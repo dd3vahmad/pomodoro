@@ -23,7 +23,7 @@ aMode:      db 1   ; active (start in active mode)
 currentPeriod: db 0
 
 ; control flags
-timerStarted:  db 0
+timerStarted:  db 1   ; (auto start timer)
 timerPaused:   db 0
 
 location:    db 6
