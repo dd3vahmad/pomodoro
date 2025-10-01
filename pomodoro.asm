@@ -1,91 +1,79 @@
+; Pomodoro timer (real-mode .COM/TSR style)
 [org 0x0100]
   jmp start
 
+; -------------------------
+; Data
+; -------------------------
+min:        dw 25
+s:          dw 0
+ms:         dw 0
 
-; Original Time
-min:  dw 25
-s:    dw 0
-ms:   dw 0
+oldKb:      dd 0
 
-oldKb: dd 0   ; For the purpose of saving old keyboard ISR
+; resting durations (minutes)
+shortPeriod: db 5
+longPeriod:  db 15
 
-; Resting periods
-shortPeriod: db 5     ; short resting period of 5mins
-longPeriod: db 15     ; long resting period of 15mins
+; modes
+rMode:      db 0   ; resting
+aMode:      db 1   ; active (start in active mode)
 
-; Flags for modes
-rMode: db 0   ; For setting into resting mode
-aMode: db 1   ; For setting into active mode
+; rest scheduling (0..2 -> S, S, L)
+currentPeriod: db 0
 
-; Flags for managing resting period
-periodCount: db 2       ; number of times to repeat resting period
-currentPeriod: db 0     ; where '0' means short and '1' means long
-doubleShortPeriod: db 1 ; where '1' means double short and '0' means single
+; control flags
+timerStarted:  db 0
+timerPaused:   db 0
 
-; Flags for other functions
-timerStarted:   db 0    ; sets to '1' when timer starts
-timerPaused:   db 0     ; sets to '1' when timer pauses
+location:    db 6
 
-location: db 6
-;--------------------------------------------------------------
-
-
-; Clear the screen subroutine
-cls: 
+; -------------------------
+; Clear screen
+; -------------------------
+cls:
   pusha
   push es
-  mov ax, 0xB800    ; point ES to text video memory
+  mov ax, 0xB800
   mov es, ax
   xor di, di
-  mov ax, 0x720
+  mov ax, 0x0720
   mov cx, 2000
-
   cld
   rep stosw
-
   pop es
   popa
   ret
-;--------------------------------------------------------------
 
-
-
-; Print the timer layout
-printTimer: 
+; -------------------------
+; Print layout
+; -------------------------
+printTimer:
   pusha
   push es
-
-  mov ax, 0xB800    ; point ES to text video memory
+  mov ax, 0xB800
   mov es, ax
-
   mov di, 160
-
-  mov byte[es:di+0], 'M'
-  mov byte[es:di+2], 'I'
-  mov byte[es:di+4], 'N'
-
-  mov byte[es:di+8], ':'
-
-  mov byte[es:di+12], 'S'
-
-  mov byte[es:di+16], ':'
-
-  mov byte[es:di+20], 'M'
-  mov byte[es:di+22], 'S'
-
+  mov byte [es:di+0], 'M'
+  mov byte [es:di+2], 'I'
+  mov byte [es:di+4], 'N'
+  mov byte [es:di+8], ':'
+  mov byte [es:di+12], 'S'
+  mov byte [es:di+16], ':'
+  mov byte [es:di+20], 'M'
+  mov byte [es:di+22], 'S'
   pop es
   popa
   ret
-;--------------------------------------------------------------
 
-
-
-; Keyboard ISR - It basically handles keyboard key clicks
-kbisr: 
+; -------------------------
+; Keyboard ISR
+; -------------------------
+kbisr:
   push ax
-  in  al, 0x60        ; read scancode from keyboard controller
+  in  al, 0x60
 
-  ; Check release codes only
+  ; release codes (scancode set 1)
   cmp al, 0x93        ; 'R' released
   jz resetTimer
 
@@ -98,150 +86,168 @@ kbisr:
   cmp al, 0xAE        ; 'C' released
   jz startTimer
 
-  cmp al, 185         ; 'SPACE' released
+  cmp al, 185         ; SPACE released
   jz startTimer
-  
-  jnz oldKBHandler    ; Unknown key released
 
+  jnz oldKBHandler
 
-; Reset timer
+; reset
 resetTimer:
   mov word [cs:min], 25
   mov word [cs:s], 0
   mov word [cs:ms], 0
   mov byte [cs:rMode], 0
   mov byte [cs:aMode], 1
-
+  mov byte [cs:timerStarted], 0
+  mov byte [cs:timerPaused], 0
   call cls
-
   mov byte [cs:location], 6
-
   jmp EOI
 
-
-; Start timer
+; start toggle
 startTimer:
-  cmp byte [cs:timerStarted], 1   ; If timer is already started
-  jz pauseTimer                   ; pause it
+  cmp byte [cs:timerStarted], 1
+  jz doPauseFromStartLabel
+  ; start timer
+  mov byte [cs:timerStarted], 1
+  mov byte [cs:timerPaused], 0
+  jmp EOI
 
-  mov byte [cs:timerStarted], 1   ; Else start the timer
+doPauseFromStartLabel:
+  ; if already started, toggle pause
+  cmp byte [cs:timerPaused], 1
+  jz unpauseFromStart
+  mov byte [cs:timerPaused], 1
+  jmp EOI
+unpauseFromStart:
+  mov byte [cs:timerPaused], 0
+  jmp EOI
 
-; Pause timer
+; explicit pause (P)
 pauseTimer:
-  cmp byte [cs:timerPaused], 1    ; If timer is already paused
-  jz startTimer                   ; start it
+  cmp byte [cs:timerPaused], 1
+  jz unpause_label
+  mov byte [cs:timerPaused], 1
+  jmp EOI
+unpause_label:
+  mov byte [cs:timerPaused], 0
+  jmp EOI
 
-  mov byte [cs:timerPaused], 1    ; Else pause the timer
-
-
-; Ends our program interrupt
+; send EOI and return
 EOI:
-  mov al, 0x20    ; End of interrupt signal
+  mov al, 0x20
   out 0x20, al
-
   pop ax
   iret
 
-
-; Rest of the keyboard keys are handled by the old key keyboard ISR
 oldKBHandler:
   pop ax
   jmp far [cs:oldKb]
-;--------------------------------------------------------------
 
-; To print the number on screen
+; -------------------------
+; Print number helper
+; Arguments:
+;   [bp+4] = location (offset in B800)
+;   [bp+6] = number (word)
+; -------------------------
 printToScreen:
   push bp
   mov bp, sp
   pusha
 
   push es
-
-  mov ax, 0xB800    ; point ES to text video memory
+  mov ax, 0xB800
   mov es, ax
 
-  mov di, [bp+4]    ; location in video memory
-  mov ax, [bp+6]    ; number to print
+  mov di, [bp+4]    ; location
+  mov ax, [bp+6]    ; number
 
-  mov bx, 10        ; we'll divide by 10 each time
-  mov cx, 0         ; digit count
+  mov bx, 10
+  xor cx, cx        ; digit count = 0
 
-nextDigit:
-  mov dx, 0
-  div bx            ; divide AX by 10 -> quotient in AX, remainder in DX
-
-  add dl, 0x30      ; turn remainder into ASCII digit ('0' - '9')
-  push dx           ; save this digit
-  inc cx            ; count digits
+.nextDigit:
+  xor dx, dx
+  div bx            ; AX = AX / 10 ; DX = remainder
+  add dl, '0'
+  push dx
+  inc cx
   cmp ax, 0
-  jnz nextDigit
+  jnz .nextDigit
 
   cmp cx, 1
-  jnz nextPOS
+  jnz .nextPOS
   mov byte [es:di], '0'
   add di, 2
 
-
-nextPOS:
-  pop dx              ; get last digit back
-  mov dh, 0x07        ; attribute (light grey on black)
-  mov [es:di], dx     ; write digit + attribute on screen
-  add di, 2           ; move to the next cell
-  loop nextPOS
+.nextPOS:
+  ; CX holds number of digits, use LOOP with CX
+  ; But loop expects CX as counter. We used CX above.
+  ; Pop digits and print
+.printLoop:
+  pop dx
+  mov dh, 0x07
+  mov [es:di], dx
+  add di, 2
+  loop .printLoop
 
   pop es
   popa
   pop bp
   ret 4
-;--------------------------------------------------------------
 
-
-; Function which prints the time on screen
+; -------------------------
+; Print full time: args:
+;  [bp+4] = base location
+;  [bp+6] = minutes
+;  [bp+8] = seconds
+;  [bp+10] = ms
+; -------------------------
 printTime:
   push bp
   mov bp, sp
   pusha
-
   push es
 
   mov ax, 0xB800
   mov es, ax
 
-  mov di, [bp+4]      ; Location where the time is to be printed
+  mov di, [bp+4]
 
-  ; Printing minutes
+  ; minutes
   push word [bp+6]
   add di, 2
   push di
   call printToScreen
 
-  ; Printing colon
+  ; colon
   add di, 6
   mov byte [es:di], ':'
 
-  ; Printing seconds
+  ; seconds
   push word [bp+8]
-  add di, 2
+  add di, 6
   push di
   call printToScreen
 
-  ; Printing colon
+  ; colon
   add di, 6
   mov byte [es:di], ':'
 
-  ; Printing milli seconds
+  ; milliseconds
   push word [bp+10]
   add di, 2
   push di
   call printToScreen
 
   pop es
-
   popa
   pop bp
   ret 10
-;--------------------------------------------------------------
 
+; -------------------------
+; Pomodoro timer ISR (wired to IRQ0 / int 8)
+; Called repeatedly by hardware timer
+; -------------------------
 pomodoroTimer:
   pusha
   push es
@@ -251,96 +257,188 @@ pomodoroTimer:
   push word [cs:ms]
   push word [cs:s]
   push word [cs:min]
-
   push 480
   call printTime
 
+  ; If timer started and not paused -> update countdown
   cmp byte [cs:timerStarted], 1
-  jnz dEOI      ; Using two jumps because of the short range of near jump
+  jne .skipUpdate
+  cmp byte [cs:timerPaused], 1
+  je .skipUpdate
 
-dEOI:
-  jmp EOI
+  call updateTime
 
-; Updates the time displaying on the timer 
+.skipUpdate:
+  ; send EOI for timer IRQ
+  mov al, 0x20
+  out 0x20, al
+
+  pop es
+  popa
+  iret
+
+; -------------------------
+; updateTime : decrement countdown by ~55ms per tick
+; Called from pomodoroTimer ISR when active
+; Uses borrowing from seconds/minutes. If time reaches 0 -> changeMode
+; Must preserve registers (we were called from an ISR, but we used pusha/pop)
+; -------------------------
 updateTime:
-  cmp word [cs:ms], 0
-  jle carryFromSeconds
+  pusha
 
-  sub word [cs:ms], 55
-  ; Let's stop here for now
+  ; if ms >= 55 -> just subtract
+  mov ax, [cs:ms]
+  cmp ax, 55
+  jge .subMsDirect
 
-carryFromSeconds:
-  cmp word [cs:s], 0
-  jle carryFromMinutes
+  ; need to borrow from seconds
+  mov ax, [cs:s]
+  cmp ax, 0
+  jne .borrowFromSeconds
 
-  add word [cs:ms], 1000
-  dec word [cs:s]
-
-carryFromMinutes:
-  cmp word [cs:min], 0
-  jz changeMode
-
-  add word [cs:s], 60
+  ; seconds == 0 => check minutes
+  mov ax, [cs:min]
+  cmp ax, 0
+  je .timeUp    ; minutes == 0 and seconds == 0 -> time up
+  ; borrow from minutes
   dec word [cs:min]
-;--------------------------------------------------------------
+  ; seconds become 59
+  mov word [cs:s], 59
+  ; increase ms by 1000 so we can subtract
+  add word [cs:ms], 1000
+  jmp .subMsNow
 
-; Toggles timer mode between resting and active modes
-changeMode:		
- 	jnz checkAMode
- 			
- 	mov byte [cs:aMode], 0			; Disable the active mode
- 				
- 	cmp byte [cs:rMode], 1			; If rMode was already enabled then do nothing
- 	jz EOI
- 				
- 	mov byte [cs:rMode], 1			; Else enable the rMode
- 	jmp EOI
+.borrowFromSeconds:
+  dec word [cs:s]
+  add word [cs:ms], 1000
+  jmp .subMsNow
 
+.subMsDirect:
+  ; nothing to borrow, just subtract
+.subMsNow:
+  sub word [cs:ms], 55
+  jmp .done
 
-# checkAMode:	
-#   cmp al, 182						; Release code of Shift Right
-# 	jnz startTimer
-# 				
-# 	mov byte [cs:rMode], 0			; Disable the rest mode
-# 				
-# 	cmp byte [cs:aMode], 1			; If aMode was aleady enabled then do nothing
-# 	jz  EOI
-# 				
-# 	mov byte [cs:aMode], 1			; Else enable the aMode
-# 	jmp EOI
+.timeUp:
+  ; timer reached zero -> toggle mode (active <-> resting)
+  call changeMode
+  ; after changeMode we start the timer automatically (if appropriate)
+  jmp .done
 
-; Driver Function (the starting point)
+.done:
+  popa
+  ret
+
+; -------------------------
+; changeMode: toggle between active and resting
+; If we were active -> go to resting (call addRestPeriod to set rest duration)
+; If we were resting -> go to active (set 25 minutes default)
+; -------------------------
+changeMode:
+  pusha
+
+  cmp byte [cs:aMode], 1
+  je .toRest       ; if currently active -> switch to rest
+
+  ; else currently resting -> go active
+  ; set active mode values
+  mov byte [cs:rMode], 0
+  mov byte [cs:aMode], 1
+  mov word [cs:min], 25
+  mov word [cs:s], 0
+  mov word [cs:ms], 0
+  mov byte [cs:timerStarted], 1
+  mov byte [cs:timerPaused], 0
+  jmp .endChange
+
+.toRest:
+  ; going to rest mode
+  mov byte [cs:aMode], 0
+  mov byte [cs:rMode], 1
+  call addRestPeriod
+  mov byte [cs:timerStarted], 1
+  mov byte [cs:timerPaused], 0
+
+.endChange:
+  popa
+  ret
+
+; -------------------------
+; addRestPeriod: choose S or L based on currentPeriod (0->S,1->S,2->L) then advance index
+; sets min, s, ms accordingly
+; -------------------------
+addRestPeriod:
+  pusha
+
+  mov al, [cs:currentPeriod]
+  cmp al, 2
+  jne .shortRest
+
+  ; long rest
+  mov al, [cs:longPeriod]
+  movzx ax, al
+  mov [cs:min], ax
+  mov word [cs:s], 0
+  mov word [cs:ms], 0
+  ; advance period index -> wrap to 0
+  mov al, [cs:currentPeriod]
+  inc al
+  mov [cs:currentPeriod], al
+  cmp al, 3
+  jb .afterAdvance
+  mov byte [cs:currentPeriod], 0
+  jmp .afterAdvance
+
+.shortRest:
+  ; short rest
+  mov al, [cs:shortPeriod]
+  movzx ax, al
+  mov [cs:min], ax
+  mov word [cs:s], 0
+  mov word [cs:ms], 0
+  ; advance index
+  mov al, [cs:currentPeriod]
+  inc al
+  mov [cs:currentPeriod], al
+  cmp al, 3
+  jb .afterAdvance
+  mov byte [cs:currentPeriod], 0
+
+.afterAdvance:
+  popa
+  ret
+
+; -------------------------
+; Driver / startup
+; -------------------------
 start:
   mov ax, 0
-	mov es, ax		
-			
-	; Saving the previous keyboard handler routine
-	mov ax, [es:9*4]
-	mov [oldkb],ax
-	mov ax, [es:9*4+2]
-	mov [oldkb+2], ax
-			
-	call cls
+  mov es, ax
 
-	; Hooking the interrupts
-	cli
-			 
-	; Keyboard Interrupt
-	mov word [es:9*4], kbisr
-  mov [es:9*4+2], cs
-			
-	; Timer Interrupt
-	mov word [es:8*4], pomodoroTimer
-	mov [es:8*4+2], cs
-			 
-	sti
-			 		
-	; Making it TSR 
-	mov dx, start
-	add dx, 15
-	mov cl, 4
-	shr dx, cl
-			 
-	mov ax, 0x3100
-	int 21h
-;--------------------------------------------------------------
+  ; save old keyboard handler (vector 9)
+  mov ax, [es:9*4]
+  mov [oldKb], ax
+  mov ax, [es:9*4+2]
+  mov [oldKb+2], ax
+
+  call cls
+
+  cli
+  ; hook keyboard IRQ (vector 9)
+  mov word [es:9*4], kbisr
+  mov word [es:9*4+2], cs
+
+  ; hook timer IRQ (vector 8)
+  mov word [es:8*4], pomodoroTimer
+  mov word [es:8*4+2], cs
+  sti
+
+  ; become TSR
+  mov dx, start
+  add dx, 15
+  mov cl, 4
+  shr dx, cl
+  mov ax, 0x3100
+  int 21h
+
+  ret
