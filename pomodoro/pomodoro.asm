@@ -89,7 +89,7 @@ kbisr:
   cmp al, 185         ; SPACE released
   jz startTimer
 
-  jnz oldKBHandler
+  jmp near oldKBHandler
 
 ; reset
 resetTimer:
